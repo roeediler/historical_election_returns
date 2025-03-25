@@ -1,0 +1,1436 @@
+---
+title: "Dealing With Historical US Election Data - Part 2"
+subtitle: "A comprehensive guide to processing, cleaning, and analyzing complex data"
+author: "Roee Diler"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: united
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+    df_print: paged
+  pdf_document:
+    toc: yes
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+set.seed(123)
+```
+
+# Introduction
+
+## Background and Importance
+
+Welcome back to the second part of the guide on validating historical US
+election data. In the previous section, we covered the initial steps of
+data processing, including importing the raw ICPSR data and performing
+basic data cleaning tasks. In this section, we will continue the data
+cleaning process by addressing more complex issues such as missing
+values, duplicate entries, and data anomalies.
+
+Working with historical election data presents several challenges:
+
+1.  Inconsistent formatting across different time periods
+2.  Missing or incorrectly coded values
+3.  Potential data entry errors in the original sources
+
+This guide demonstrates a systematic approach to process, validate, and
+prepare this data for reliable analysis.
+
+## Purpose of This Guide
+
+This document will walk through:
+
+-   Identifying and handling missing or problematic data points
+-   Validating data integrity through systematic checks
+-   Preparing clean, consistent datasets for further analysis
+-   Documenting data limitations and considerations for interpretation
+
+By following these steps, researchers can ensure the highest possible
+data quality for their electoral analyses.
+
+## Required Packages
+
+We load the necessary libraries using `pacman` for package management.
+
+```{r load-packages}
+rm(list = ls())  # Clear workspace
+
+library(pacman)
+p_load(data.table, tidyverse, naniar, Hmisc, rlist, labelled)
+```
+
+# Data Setup
+
+## Define Paths
+
+We set up directory paths dynamically based on the script location.
+
+```{r define-paths}
+# Get the directory where this script is located
+script_path <- dirname(rstudioapi::getSourceEditorContext()$path)
+basic_path <- script_path
+data_path <- file.path(basic_path, "data")
+icpsr_path <- file.path(data_path, "ICPSR/ICPSR_00001")
+```
+
+## Loading Raw Data
+
+We begin by importing the previously processed long-format ICPSR data.
+This file contains election results that have been extracted from the
+original ASCII files and converted to a more accessible format.
+
+```{r, include=FALSE}
+raw_data <- fread(paste0(data_path, "/icpsr_long_raw.csv"))
+```
+
+```{r load-raw-data}
+# Load the raw ICPSR data that was previously processed
+icpsr_data <- fread(paste0(data_path, "/icpsr_long_raw.csv"))
+
+# Display the first few rows of the dataset
+head(icpsr_data)
+```
+
+Dataset dimensions: `r dim(icpsr_data)[1]` rows and
+`r dim(icpsr_data)[2]` columns
+
+# Data Cleaning and Manipulation
+
+## Remove Columns
+
+First, we remove any congressional district columns as our main focus is
+on state and county-level election data.
+
+```{r remove-cols}
+# Remove congressional district columns
+icpsr_data <- icpsr_data[!(str_detect(column_name, "CONG_DIST_NUMBER")), ]
+```
+
+Removed `r nrow(raw_data) - nrow(icpsr_data)` rows containing
+congressional district data
+
+## Rename Columns for Clarity
+
+We rename columns to make the data more intuitive and easier to work
+with. We will rename key columns in the standard format of NHGIS data
+for advanced analysis in the future.
+
+```{r rename-columns}
+# Rename columns to more descriptive names
+setnames(icpsr_data, 
+         old = c("variable", "V1", "V2", "V3", "value", "values"), 
+         new = c("column_number", "ICPSRST", "ICPSRNAM", 
+                 "ICPSRCTY", "VOTES", "missing_value"))
+```
+
+## Identify Duplicate Entries
+
+We create a unique identifier for each data point to help identify
+duplicates that might skew our analysis. Each data point is identified
+by a combination of data source (the original data set from ICPSR),
+state, county, and column number. If there is more than one entry for
+the same identifier, we flag it as a duplicate and investigate further.
+
+```{r identify-duplicates}
+# Create identifiers for each unique data point
+icpsr_data <- icpsr_data[, ids := seq_len(.N), 
+                        by = .(source, ICPSRST, ICPSRNAM, ICPSRCTY, column_number)]
+
+# Identify columns with duplicate entries
+duplicate_columns <- icpsr_data[ids > 1, .(column_number, source)] %>% unique()
+
+# Display columns with duplicates
+duplicate_columns
+rm(duplicate_columns)
+```
+
+### Examine Specific Problematic Cases
+
+We examine specific columns that have been identified as problematic
+based on the duplicate analysis.
+
+```{r examine-problematic-cases}
+# Define conditions for problematic columns
+cond1 <- (icpsr_data$column_number == "V290" & 
+            icpsr_data$source == "DS0042")
+cond2 <- (icpsr_data$column_number == "V163" & 
+            icpsr_data$source == "DS0046")
+
+# Display details about these problematic columns
+problem_info <- icpsr_data[cond1 | cond2, 
+                          .(source, column_number, column_name, missing_value)] %>% 
+                unique()
+
+problem_info
+rm(problem_info, cond1, cond2)
+```
+
+As we can see, the identified problematic columns have duplicate entries
+that need to be resolved. Some of the missing values are coded as
+"9900000 thru highest," which requires special handling. We will address
+these issues in the following section. Now, let's examine the
+overall missing value patterns in the dataset.
+
+The missing values represent the value of the votes that should be
+counted as missing. Usually, the missing values are coded as the maximum
+number that the data point can store (e.g. 9999999), but not always, so
+let's check the unique missing values in the dataset.
+
+```{r}
+# Display unique missing value codes
+unique(icpsr_data$missing_value)
+```
+
+So we have two numeric missing values options and one range, let's
+handle the range first and see if any other columns beside what we
+already identified have this range.
+
+```{r}
+# Check for values that exceed the "9900000 thru highest" missing value code
+high_value_cases <- icpsr_data[missing_value == "9900000 thru highest", 
+                               .(source, column_number, column_name, missing_value)] %>% 
+                unique()
+high_value_cases
+rm(high_value_cases)
+```
+
+Alright, we have already identified those problematic columns, let's
+remove them and convert the missing values to numeric.
+
+## Handle Missing Values
+
+We examine and handle special missing value codes to ensure data
+quality.
+
+```{r}
+# Check for values that exceed the "9900000 thru highest" missing value code
+icpsr_data[missing_value == "9900000 thru highest" & VOTES >= 9900000, VOTES] %>% unique()
+```
+
+As we can see, the only values of `VOTES` that exceed the missing value
+threshold 9900000 are 9999999 and we already have those missing values
+in other rows, so we can safely remove the rows with the missing value
+"9900000 thru highest".
+
+```{r handle-special-missing}
+# Remove these problematic cases
+icpsr_data <- icpsr_data[missing_value != "9900000 thru highest", ]
+
+# Clean up and convert missing values to numeric
+icpsr_data[, ":=" (ids = NULL,
+                   missing_value = as.numeric(missing_value))]
+
+```
+
+### Data Validation: Missing Value Checks
+
+Now that we checked our missing values, let's perform additional
+validation to ensure data quality.
+
+```{r}
+icpsr_data[order(VOTES, decreasing = TRUE), ] %>% 
+  filter(VOTES != missing_value) %>% 
+  select(VOTES, missing_value) %>% 
+  unique()
+```
+
+We can see that there are some errors in the data where the votes exceed the missing value threshold and some cases that the votes are just slightly below the missing value threshold. These cases can be considered as missing values as well. 
+
+Let's see how many errors like this we have in the data.
+
+```{r validate-missing-values}
+# Check for values that exceed missing value thresholds
+exceeded_missing <- icpsr_data[(VOTES > missing_value),]
+```
+
+Found `r nrow(exceeded_missing)` rows with data points that exceed their
+missing value.
+
+```{r}
+# Check for borderline values
+borderline_values <- icpsr_data[(VOTES == 9999990),]
+```
+
+Found `r nrow(borderline_values)` rows with data points just below the
+missing value.
+
+Now, let's examine the other missing value threshold - "999999".
+
+```{r}
+icpsr_data[order(VOTES, decreasing = TRUE), ] %>% 
+  filter(VOTES != missing_value & between(VOTES, 999990, 999999)) %>% 
+  select(VOTES, missing_value) %>% 
+  unique()
+```
+
+We can see that there are some cases that the missing value threshold is probably a mistake and should be 999999.
+
+```{r}
+icpsr_data[VOTES > 999999 , .(missing_value)] %>% unique()
+```
+
+We don't have any cases where the missing value threshold is lower than the actual missing value.
+
+Let's examine the percentage of total data points that should be
+converted to missing value.
+
+```{r}
+# Calculate what percentage of data points are near missing value thresholds
+near_missing_pct <- nrow(icpsr_data[(VOTES >= 9999990 | VOTES == 999999),]) / nrow(icpsr_data)
+near_missing_pct <- round(near_missing_pct * 100, 2)
+```
+
+Percentage of data points that will be converted to missing value:
+`r near_missing_pct`%
+
+```{r, include=FALSE}
+rm(exceeded_missing, borderline_values, near_missing_pct)
+```
+
+### Apply Corrections to Borderline Values
+
+We convert suspicious values that are near missing value thresholds to
+NA, as they likely represent missing data rather than actual vote
+counts.
+
+```{r correct-borderline-values}
+# Convert suspicious values to NA
+icpsr_data[(VOTES >= 9999990 | VOTES == 999999), VOTES := NA]
+
+# Remove the missing_value column as it's no longer needed
+icpsr_data[, missing_value := NULL]
+```
+
+# Columns Names
+
+## Convert Column Names to Separate Fields
+
+When the data was in wide format each column contain votes that a
+specific party got in a specific year in election for a specific office.
+From the ICPSR website we know how to interpret the column names:
+
+> Some variable labels are cryptic.
+>
+> For example, the variable label V34="825 2 G GOV 9001 VOTE" is
+> interpreted as:
+>
+> 1.  year of election
+> 2.  code for elected office
+> 3.  type of election
+> 4.  elected office
+> 5.  party code.
+
+**Note**: the "VOTE" in the end of the column name simply means that
+this column contain votes rather than other data so we can discard it.
+
+Let's look at some columns' names in our data:
+
+```{r}
+# Display a random sample of column names
+sample(unique(icpsr_data$column_name), 5)
+```
+
+We can see that the column names follow the format described above with
+underscore as a separator.
+
+## Split Column Names
+
+Now if we split the column names by the underscore we expect to get a
+vector with 6 strings. Let's check if this is the case.
+
+```{r}
+col_name_data <- tstrsplit(icpsr_data$column_name, "_")
+
+col_name_data <- as.data.table(col_name_data)
+
+# Display the number of columns:
+ncol(col_name_data)
+```
+
+The number of columns in the split data table is `r ncol(col_name_data)`. Which is
+not according to our expectations. Let's investigate further.
+
+```{r}
+# count the number of NA's in each column:
+colSums(is.na(col_name_data))
+```
+
+We have NA values only the the three last columns.
+
+Let's examine the last column.
+
+```{r}
+col_name_data[!is.na(V7) , ] %>% unique()
+```
+
+As we can see, there is one additional underscore in some of the column
+names. It seems that we have the right components, the three first
+columns are year, office code and election type. The two last columns
+are party code and the final "VOTE" but the office name has an extra
+underscore. Let's fix this issue.
+
+**HAL** is a common abbreviation for "House of Assembly" in historical
+election data. We will fix this issue to maintain consistency, but first
+let's make sure that this is the only problem.
+
+```{r}
+apply(col_name_data[!is.na(V7) , ], 2, unique)
+```
+
+It seems that the only issue is the extra underscore in the office name.
+Let's fix this issue.
+
+```{r}
+col_name_data[!is.na(V7) , ":=" (V4 = "HAL", V5 = V6, V6 = V7, V7 = NA)]
+
+col_name_data[!is.na(V7) , ] %>% nrow()
+```
+
+```{r}
+col_name_data[ , V7 := NULL]
+```
+
+Now that we have the correct number of columns, let's look into the
+unique values of each column.
+
+## First column - Year of Election
+
+```{r}
+unique(col_name_data$V1)
+```
+
+It seems that the first column contains the year of the election. Let's
+convert it to a numeric format for further analysis.
+
+```{r}
+# make sure that the first character is "X" and replace it with "1"
+col_name_data$V1 %>% str_detect("^X") %>% all()
+```
+
+```{r}
+col_name_data[ , V1 := as.numeric(gsub("X", "1", V1))]
+
+col_name_data$V1 %>% unique() %>% sort()
+
+```
+
+We can see two issues here:
+
+1.  The smallest value is 192, which is incorrect. We should have years
+    starting from 1824 (1823 for one specific case).
+2.  The largest value is 11827, which is also incorrect. We should have
+    years up to 1968.
+
+Let's investigate these issues further:
+
+### Incorrect Minimum Year
+
+```{r}
+col_name_data[V1 == 192, ] %>% unique()
+```
+
+```{r}
+# look for this election in the original data
+icpsr_data[column_name == "X92_G_PRES_0100_VOTE", .(source, column_number)] %>% unique()
+```
+
+```{r}
+icpsr_data[source == "DS0172" & column_number %in% paste0("V", 63:67), 
+           .(column_number, column_name)] %>% unique()
+```
+
+It seems that the issue here is a typo in the original data. The correct
+year should be 1920 by the order of the years in the previous and next
+columns. In addition, the elected office code is missing as well. Let's
+fix this issue.
+
+```{r}
+col_name_data[V1 == 192, ":=" (V1 = 1920, V2 = 1, V3 = V2, V4 = V3, V5 = V4, V6 = V5)]
+```
+
+### Incorrect Maximum Year
+
+```{r}
+col_name_data[V1 == 11827, ] %>% unique()
+```
+
+```{r}
+# look for this election in the original data
+icpsr_data[str_detect(column_name, "X1827"), .(source, column_number)] %>% unique()
+
+```
+
+```{r}
+icpsr_data[source == "DS0126" & column_number %in% paste0("V", 45:55), 
+           .(column_number, column_name)] %>% unique()
+```
+
+Once again, it seems that the issue is a typo in the original data. The
+correct year should be 1827. Let's fix this issue.
+
+```{r}
+col_name_data[V1 == 11827, V1 := 1827]
+
+col_name_data$V1 %>% summary()
+```
+
+Now that is better!
+
+Let's move on to the second column.
+
+## Second column - Elected Office Code
+
+This column should contain the code for the elected office. There is no
+official codebook for this dataset but we can assume that the values
+should be numeric based on the comment above and the range should be
+like in other related dataset in the ICPSR.
+
+So for example, there is the *Candidate Name and Constituency Totals,
+1788-1990 (ICPSR 2)*, in which we found the following values for the
+office code:
+
+-   1 - President
+-   2 - Governor
+-   3 - US Rep.
+-   4 - Senate 1
+-   5 - Senate 2
+-   6 - Senate 3
+-   7 - State Offices
+
+```{r}
+unique(col_name_data$V2)
+```
+
+Not all values are numeric as expected, we have a values "PRES", "GOV",
+and "SEN" which should be on the forth column.
+
+Let's fix these issues.
+
+### Misplaced Values of Elected Office
+
+```{r}
+col_name_data[V2 %in% c("PRES", "GOV", "SEN"), ] %>% apply(2, unique)
+
+```
+
+We can see that some of the rows are missing both the elected office
+code and the election type, while others have the elected office code in
+the wrong column. We can divide these cases using the "V5" column, if a
+column name is missing both the code and type - the "V5" column will be
+NA.
+
+Let's make sure that this cases are completely differentiable.
+
+```{r}
+# unique values in cases with missing values in the V5 column
+col_name_data[V2 %in% c("PRES", "GOV", "SEN") & is.na(V5), ] %>% apply(2, unique)
+```
+
+We can see that all of the cases with missing values in the "V5" column
+are missing both the office code and the election type and the elected
+office are "PRES" or "GOV". We will adjust the data to the correct
+columns.
+
+```{r}
+# unique values in cases with values in the V5 column
+col_name_data[V2 %in% c("PRES", "GOV", "SEN") & !is.na(V5), ] %>% apply(2, unique)
+```
+
+We can see that all of the cases with values in the "V5" column have the
+office code in the wrong column and the elected office is "SEN". We will
+adjust the data to the correct columns.
+
+```{r}
+# Change the order of the columns for cases with missing values in the V5 column
+col_name_data[V2 %in% c("PRES", "GOV") ,
+  ":=" (V2 = NA, V3 = NA, V4 = V2, V5 = V3, V6 = V4)]
+```
+
+```{r}
+# Change the order of the columns for cases with values in the V5 column
+col_name_data[V2 %in% c("SEN") , 
+  ":=" (V2 = V3, V3 = NA, V4 = V2, V5 = V4, V6 = V5)]
+```
+
+Now that we have fixed the misplaced values, let's convert the column to
+numeric.
+
+```{r}
+col_name_data[ , V2 := as.numeric(V2)]
+
+col_name_data$V2 %>% unique()
+
+```
+
+## Third column - Election Type
+
+This column should contain the type of election. From the example above
+and the data we saw already we can assume that the values should be
+strings, specifically one character strings.
+
+Here we found two related datasets in the ICPSR website that tell us
+what to expect in this column:
+
+From the same dataset as before (ICPSR 2):
+
+-   G - General
+-   M - Multiple G election
+-   S - Special
+-   W - Multiple S election
+
+From the *ICPSR 3371* dataset we found:
+
+-   G - General
+-   M - Multi-Member District Election
+-   S - Special
+-   W - Missing Data
+
+Let's check the unique values in this column.
+
+```{r}
+unique(col_name_data$V3)
+```
+
+We can see that we have some values that are not as expected.
+
+Specifically, we have the value "ATGN" which is not a valid election
+type, it is common abbreviation for "Attorney General" in historical
+election data which means that this is a data entry error.
+
+Moreover, we have the values that we would expect like "G" and "S" with
+number attached to them, which is not expected. Let's investigate these
+issues further.
+
+```{r}
+col_name_data[V3 == "ATGN" , ] %>% unique()
+```
+
+It's look like a one specific case that we can find in the original
+data.
+
+```{r}
+icpsr_data[str_detect(column_name, "_7_ATGN") , .(source, column_number, column_name)] %>% unique()
+```
+
+This is the election for the Attorney General in 1968 in Washington.
+
+We will adjust the data to the correct columns
+
+```{r}
+col_name_data[V3 == "ATGN" , ":=" (V3 = NA, V4 = V3, V5 = V4, V6 = V5)]
+```
+
+Let's investigate the other issue.
+
+```{r}
+col_name_data[str_detect(V3, "G\\d") | str_detect(V3, "S\\d"), ] %>% unique()
+```
+
+Looks like the issue is in two different elections, one of the "G" from
+1831, and the other of the "S" from 1842.
+
+```{r}
+icpsr_data[str_detect(column_name, "X831_2_G04|X831_2_G11") , .(source, ICPSRST, column_name)] %>% unique()
+```
+
+This is a special case of two different general elections in 1831 in
+Massachusetts. Until 1831, the election in Massachusetts was conducted
+annually in April. This was the final regular Massachusetts election
+scheduled for April before the schedule changed to November.
+
+Let's investigate the other issue.
+
+```{r}
+icpsr_data[str_detect(column_name, "X842_3_S06|X842_3_S11") , .(source, ICPSRST, column_name)] %>% unique()
+```
+
+Once again, Massachusetts is giving us a hard time. This time it's two
+different special elections in 1842 at the same congressional district.
+Twice in this year, the incumbent congressman resigned and a special
+election was held to fill the vacancy.
+
+In order to be able to differentiate between these elections we will add
+another column to the data that will contain the month of the election.
+
+```{r}
+col_name_data[str_detect(V3, "G\\d") | str_detect(V3, "S\\d"), ":=" (month = as.numeric(substr(V3, 2, 3)),
+                                                         V3 = substr(V3, 1, 1))]
+
+unique(col_name_data$V3)
+
+```
+
+Before moving on to the next column, did you cache the other issue that
+came up from our investigation on the special elections in
+Massachusetts?
+
+There is a typo in some cases where the elected office and the party
+code does not have an underscore between them. Let's fix this issue.
+
+```{r}
+col_name_data[V3 == "S" & month == 6 & is.na(V6) , ":=" (V4 = "CNG", V5 = "TOTAL", V6 = V5)]
+```
+
+## Forth column - Elected Office
+
+This column should contain the name of the elected office. We have
+already seen that there are some issues with this column, let's
+investigate further.
+
+```{r}
+unique(col_name_data$V4)
+```
+
+We can see that we have some values that are not as expected. One issue
+is the values "CNG" that looks like a typo in the original data. We will
+fix this issue to maintain consistency.
+
+```{r}
+col_name_data[ , V4 := ifelse(V4 == "CNG", "CONG", V4)]
+```
+
+The bigger issue is the values that contain numbers or an abbreviation
+of some month. Those are probably special cases that we need to
+investigate further.
+
+```{r}
+col_name_data[str_detect(V4, "\\d") | str_detect(V4, "JAN|NOV"), -"V5"] %>% unique()
+```
+
+We will walk through each of these cases and fix them.
+
+### Special Cases
+
+#### Special Case 1 - Governor Elections in 1878
+
+```{r}
+source_1 <- icpsr_data[str_detect(column_name, "X878_2_G_GV03|X878_2_G_GV11") , .(source)] %>% unique() %>% as.character()
+
+icpsr_data[(str_detect(column_name, "X878_") & source == source_1), .(ICPSRST, column_name)] %>% unique()
+```
+
+Special case in New Hampshire in 1878 where the election date was changed from March to November.
+
+```{r}
+col_name_data[V1 == 1878 & V2 == 2 & V3 == "G" & V4 %in% c("GV03", "GV11") , 
+  ":=" (month = as.numeric(str_sub(V4, 3, 4)),
+        V4 = "GOV")]
+rm(source_1)
+```
+
+#### Special Case 2 - Special Elections in 1941
+
+```{r}
+source_2 <- icpsr_data[str_detect(column_name, "X941_3_S_CG") , .(source)] %>% unique() %>% as.character()
+
+icpsr_data[(str_detect(column_name, "X941_") & source == source_2), .(ICPSRST, column_name)] %>% unique()
+```
+
+Special case in New York in 1941 where special elections were held several times in the same year. (specifically this elections refer to the 42rd congressional district, but there were other special elections in district 17 and 14 in the same year)
+
+```{r}
+col_name_data[V1 == 1941 & V2 == 3 & V3 == "S" & V4 %in% c("CG04") , ":=" (month = as.numeric(str_sub(V4, 3, 4)),
+                                                               V4 = "CONG")]
+rm(source_2)
+```
+
+#### Special Case 3 - Special Elections in 1859
+
+```{r}
+source_3 <- icpsr_data[str_detect(column_name, "X859_3_S_CGNOV|X859_3_S_CGJAN") , .(source)] %>% unique() %>% as.character()
+
+icpsr_data[(str_detect(column_name, "X859_") & source == source_3), .(ICPSRST, column_name)] %>% unique()
+```
+
+Special case in Illinois in 1859 where special elections were held in November and January in the same year.
+
+```{r}
+col_name_data[V1 == 1859 & V2 == 3 & V3 == "S" & V4 %in% c("CGNOV") , ":=" (month = 11, V4 = "CONG")]
+col_name_data[V1 == 1859 & V2 == 3 & V3 == "S" & V4 %in% c("CGJAN") , ":=" (month = 1, V4 = "CONG")]
+
+rm(source_3)
+```
+
+#### Special Case 4 - Special Elections in 1923
+
+```{r}
+source_4 <- icpsr_data[str_detect(column_name, "X923_3_S_CG04|X923_3_S_CG11") , .(source)] %>% unique() %>% as.character()
+
+icpsr_data[(str_detect(column_name, "X923_") & source == source_4), .(ICPSRST, column_name)] %>% unique()
+```
+
+Special case in Illinois in 1923 where special elections were held in November and January in the same year.
+
+```{r}
+col_name_data[V1 == 1923 & V2 == 3 & V3 == "S" & V4 %in% c("CG04", "CG11") , 
+  ":=" (month = as.numeric(str_sub(V4, 3, 4)),
+        V4 = "CONG")]
+rm(source_4)
+```
+
+#### Special Case 5 - Special Elections in 1929
+
+```{r}
+source_5 <- icpsr_data[str_detect(column_name, "X929_3_S_70CG|X929_3_S_71CG") , .(source)] %>% unique() %>% as.character()
+
+icpsr_data[(str_detect(column_name, "X929_") & source == source_5), .(ICPSRST, column_name)] %>% unique()
+```
+
+Special case in Missouri in 1929 where two special elections were held in the same day to select a congressman for the (rest of the) 70th and (the full term of the) 71st congresses.
+
+```{r}
+col_name_data[V1 == 1929 & V2 == 3 & V3 == "S" & V4 %in% c("70CG", "71CG") , 
+  ":=" (cong_num = as.numeric(str_sub(V4, 1, 2)),
+        V4 = "CONG")]
+rm(source_5)
+```
+
+#### Special Case 6 - Special Elections in 1870
+
+```{r}
+source_6 <- icpsr_data[str_detect(column_name, "X870_3_S_CG08|X870_3_S_CG12") , .(source)] %>% unique() %>% as.character()
+
+icpsr_data[(str_detect(column_name, "X870_") & source == source_6), .(ICPSRST, column_name)] %>% unique()
+```
+
+Special case in North Carolina in 1870 where special elections were held in August and December in the same year.
+
+```{r}
+col_name_data[V1 == 1870 & V2 == 3 & V3 == "S" & V4 %in% c("CG08", "CG12") , 
+  ":=" (month = as.numeric(str_sub(V4, 3, 4)),
+        V4 = "CONG")]
+rm(source_6)
+```
+
+#### Special Case 7 - Special Elections in 1827
+
+```{r}
+source_7 <- icpsr_data[str_detect(column_name, "X827_3_S_CG11|X827_3_S_CG12") , .(source)] %>% unique() %>% as.character()
+
+icpsr_data[(str_detect(column_name, "X827_") & source == source_7), .(ICPSRST, column_name)] %>% unique()
+```
+
+Special case in Kentucky in 1827 where special elections were held in November and December in the same year.
+
+```{r}
+col_name_data[V1 == 1827 & V2 == 3 & V3 == "S" & V4 %in% c("CG11", "CG12") , 
+  ":=" (month = as.numeric(str_sub(V4, 3, 4)),
+        V4 = "CONG")]
+rm(source_7)
+```
+
+#### Special Case 8 - Elections to HAL1 and HAL2
+
+```{r}
+source_8 <- icpsr_data[str_detect(column_name, "HAL1|HAL2") , .(source)] %>% unique() %>% as.character()
+
+icpsr_data[(str_detect(column_name, "HAL1|HAL2") & source == source_8), .(ICPSRST, column_name)] %>% unique()
+```
+
+Special case in New Mexico. From 1942 to 1968, New Mexico had two at-large representatives, with the top two vote-getters winning the seats. The first seat was designated as HAL1 and the second as HAL2. 
+
+```{r}
+col_name_data[str_detect(V4, "HAL1|HAL2"), ":=" (V4 = "HAL")]
+rm(source_8)
+```
+
+Now let's see the unique values again.
+
+```{r}
+unique(col_name_data$V4)
+```
+
+Now that we have fixed the issues, let's move on to the next column.
+
+## Fifth column - Party Code
+
+This column should contain the party code. We have a codebook for the
+party codes in the ICPSR data, let's check the unique values in this
+column.
+
+```{r}
+unique(col_name_data$V5) %>% length()
+```
+
+We have `r length(unique(col_name_data$V5))` unique values in this column. So print
+them all won't be very helpful. Let's check the unique values that are
+not numeric.
+
+```{r}
+col_name_data[is.na(as.numeric(V5)) , ]$V5 %>% unique()
+```
+
+We have issue of typo in the original data, the value "TOTA" should be
+"TOTAL" and the value "0594L" should be "0594". Let's fix this issue.
+
+```{r}
+col_name_data[ , V5 := ifelse(V5 == "TOTA", "TOTAL", V5)]
+col_name_data[ , V5 := ifelse(V5 == "0594L", "0594", V5)]
+```
+
+All other values are numeric and hopefully correct and can be merged
+with some party name.
+
+## Sixth column - "VOTE"
+
+```{r}
+unique(col_name_data$V6)
+```
+
+As we can see the values of this column are all "VOTE" (or some
+abbreviation of it) which is not relevant for our analysis. We can
+remove this column.
+
+```{r}
+col_name_data[ , V6 := NULL]
+```
+
+## Bind the Data
+
+```{r}
+setnames(col_name_data, new = c("YEAR", "ELECT_OFFICE_CODE", 
+                    "ELECT_TYPE", "ELECT_OFFICE", 
+                    "PARTY_CODE", "MONTH", "CONG_NUM"))
+
+icpsr_data <- cbind(icpsr_data, col_name_data)
+
+icpsr_data[ , c("column_number", "column_name") := NULL]
+
+rm(col_name_data)
+```
+
+## Add Index
+
+We know now that we have some duplicated rows in the data, let's add an
+index to the data to help us identify these rows. We created some of
+them in the New Mexico elections but there are more.
+
+In principle, every row in our data should be unique based on the
+combination of the state, county, year, data source and election
+details. If there is more than one row with the same combination of
+these variables, we flag it as a duplicate.
+
+It is reasonable to assume that there were cases of two candidates from
+the same party, county, and year. But other cases should be investigated
+further and we will do it later.
+
+```{r}
+icpsr_data[ , INDEX := seq_len(.N), by = .(ICPSRST, ICPSRNAM, ICPSRCTY, 
+                                           source, YEAR, ELECT_OFFICE_CODE, 
+                                           ELECT_TYPE, ELECT_OFFICE, PARTY_CODE, MONTH, CONG_NUM)]
+
+table(icpsr_data$INDEX) %>% as.data.frame()
+```
+
+Let's see one example of that:
+
+```{r}
+icpsr_data[INDEX == 25, .SD[1]]
+```
+
+On this special election to Senate in 1941 Texas, we have 25 candidates
+from the Democratic party.
+
+```{r}
+icpsr_data[ICPSRST == 49 & ICPSRCTY == 10 & YEAR == 1941 & 
+             ELECT_OFFICE_CODE == 5 & ELECT_TYPE == "S"]
+```
+
+Now we can see the full details of this election on this specific
+county. We have 25 candidates from the Democratic party and two from the
+Republican party, however, most of them have 0 votes.
+
+A quick Google search led us to [this Wikipedia
+page](https://en.wikipedia.org/wiki/1941_United_States_Senate_special_election_in_Texas)
+which states that:
+
+> In April 1941, incumbent Senator Morris Sheppard died in office.
+> Governor Pappy O'Daniel appointed Andrew 
+> Jackson Houston to fill the
+> seat until a successor could be duly elected, with the election
+> scheduled for June 
+> 28. The winner finished Sheppard's term ending in
+> 1943.
+
+More over the table shows that there were four candidates from the
+Democratic party who got most of the votes exactly as in our data.
+
+# Data Validation
+
+In this part we will validate the data to ensure that it is consistent
+and accurate.
+
+## ICPSR Notes
+
+The first thing we need to do is to read the notes from the ICPSR
+website about the data. The notes states that:
+
+> In datasets 126, 127, 128 and 129 for Georgia, the county
+> identification code for Jackson county is 1510 in the data, however,
+> it should be 1570. Users are advised when analyzing these data by
+> county to either use the county names in variable V2 or recode the
+> county identification in variable V3 from 1510 to 1570 for Jackson
+> county. (from Data Collection Notes in ICPSR website)
+
+```{r}
+icpsr_data[source %in% c("DS0126", "DS0127", "DS0128", "DS0129") & 
+             ICPSRNAM == "JACKSON" & ICPSRCTY == 1510, ICPSRCTY := 1570]
+```
+
+## Verify Elected Office and Codes
+
+Let's check if the elected office and the elected office code match
+according to the dictionary that we saw before.
+
+-   1 - President
+-   2 - Governor
+-   3 - US Rep.
+-   4 - Senate 1
+-   5 - Senate 2
+-   6 - Senate 3
+-   7 - State Offices
+
+```{r}
+table(icpsr_data$ELECT_OFFICE, icpsr_data$ELECT_OFFICE_CODE, useNA = "always")
+```
+
+We have some cases of mismatches between the elected office and the
+elected office code. Let's investigate these issues further.
+
+### Elected Office Congrass and Code 1
+
+Those are results from election in Maryland, 1848 (DS155). According to
+[Wikipedia](https://en.wikipedia.org/wiki/1848_United_States_presidential_election_in_Maryland)
+the results match the presidential election and not the congress
+election. This is a typo in the original data, the elected office should
+be "PRES" and not "CONG".
+
+```{r}
+icpsr_data[YEAR == "1848" & ELECT_OFFICE_CODE == 1 & ELECT_OFFICE == "CONG", ELECT_OFFICE := "PRES"] 
+```
+
+### Elected Office Senate and Code 2
+
+Those are results from election in Indiana, 1825 (DS061). According to
+[Wikipedia](https://en.wikipedia.org/wiki/1825_Indiana_gubernatorial_election)
+the results match the gubernatorial election and not the senate
+election. This is a typo in the original data, the elected office should
+be "GOV" and not "SEN".
+
+```{r}
+icpsr_data[YEAR == "1825" & ELECT_OFFICE_CODE == 2 & ELECT_OFFICE == "SEN", ELECT_OFFICE := "GOV"] 
+```
+
+### Elected Office President and Code 2
+
+Those are results from election in Colorado, 1894 (DS170). According to
+[Wikipedia](https://en.wikipedia.org/wiki/1894_Colorado_gubernatorial_election)
+the results match the gubernatorial election and not the presidential
+election. This is a typo in the original data, the elected office should
+be "GOV" and not "PRES".
+
+```{r}
+icpsr_data[YEAR == "1894" & ELECT_OFFICE_CODE == 2 & ELECT_OFFICE == "PRES", 
+         ELECT_OFFICE := "GOV"]
+```
+
+### Elected Office Governor and Code 3
+
+Those are results from election in Ohio, 1850 (DS070). According to
+[Wikipedia](https://en.wikipedia.org/wiki/1850_United_States_House_of_Representatives_elections_in_Ohio)
+the results match the congress election and not the gubernatorial
+election. This is a typo in the original data, the elected office should
+be "CONG" and not "GOV".
+
+we could not find any source with results or data on either the
+gubernatorial elections nor the congress election. However, all of the
+cases that labeled as ELECT_OFFICE - GOV, and ELECT_OFFICE_CODE - 3 are
+for unknown party "9999". So we will discard those cases.
+
+```{r}
+icpsr_data <- icpsr_data[!(ELECT_OFFICE_CODE == 3 & ELECT_OFFICE == "GOV") | is.na(ELECT_OFFICE_CODE), ]
+```
+
+### Elected Office Senate and Code 7
+
+Those are results from election in Arizona, 1968 (DS169). According to
+[Wikipedia](https://en.wikipedia.org/wiki/1968_United_States_Senate_election_in_Arizona)
+the results match the senate election but without those votes and so
+those votes are not part of the senate election. This is a typo in the
+original data, the elected office should be "ATGN" and not "SEN".
+
+Also we found that the results of these cases are match to the ratio of
+the GOP votes for the Attorney general as noted here: *Hall, D. R.
+(1969). The 1968 Election in Arizona. The Western Political Quarterly,
+22(3), 463. <https://doi.org/10.2307/446337>*
+
+```{r}
+icpsr_data[ELECT_OFFICE_CODE == 7 & ELECT_OFFICE == "SEN", ELECT_OFFICE := "ATGN"]
+```
+
+Now let's check the elected office and the elected office code again.
+
+```{r}
+table(icpsr_data$ELECT_OFFICE, icpsr_data$ELECT_OFFICE_CODE, useNA = "always")
+```
+
+## Delete No Data Elections
+
+If we have cases of elections with missing votes in all entries, we can safely remove them. To check for such cases, we first need to create an identifier for each election.
+
+```{r}
+# create a column with unique number for each group with in the specified columns
+
+icpsr_data[ , ELEC_ID := .GRP, by = .(ICPSRST, ICPSRNAM, ICPSRCTY, 
+                                      source, YEAR, 
+                                      ELECT_OFFICE_CODE, ELECT_TYPE, 
+                                      ELECT_OFFICE, MONTH, CONG_NUM)]
+
+summary(icpsr_data$ELEC_ID)
+```
+
+
+```{r}
+#  Count the number of missing values in the votes and compare it to the number of votes
+icpsr_data[ , ":=" (no_data_elections = sum(is.na(VOTES) | VOTES == 0) == .N), by = ELEC_ID]
+
+```
+
+If all the votes are missing in an election, we will remove this
+election from the data.
+
+```{r}
+icpsr_data <- icpsr_data[no_data_elections == F, ]
+icpsr_data[ , no_data_elections := NULL]
+```
+
+# Add States' and Parties' Names
+
+## Add States' Names
+
+Now we will add the state's name to the data, for that we will use the
+ICPSR state codebook. But first, let's check if we have any missing
+state codes.
+
+```{r}
+icpsr_data[is.na(ICPSRST) , ] %>% nrow()
+```
+
+We have some missing state codes, let's fix this issue.
+
+```{r}
+icpsr_data[is.na(ICPSRST) , source] %>% unique()
+```
+
+Missing state code in two of the data sets of New York. Let's fix this issue.
+
+```{r}
+icpsr_data[is.na(ICPSRST), ICPSRST := 13]
+```
+
+Now we will add the state's name to the data.
+
+```{r}
+state_codebook <- fread(paste0(data_path, "/ICPSR/ICPSR_codebook_state_country.csv"))
+state_codebook <- state_codebook[-1 , .SD[1], by = State, .SDcols = c("STATEICP")]
+setnames(state_codebook, new = c("STATE", "ICPSRST"))
+
+icpsr_data <- merge(icpsr_data, state_codebook, by = "ICPSRST", all.x = TRUE)
+
+icpsr_data[ , .N, by = .(STATE, ICPSRST)]
+
+rm(state_codebook)
+```
+
+## Add Parties' Names
+
+```{r}
+party_codebook <- fread(paste0(data_path, "/party_codebook.csv"))
+setnames(party_codebook, new = c("PARTY_CODE", "PARTY_NAME"))
+
+# Check for duplicates in the party codebook
+nrow(party_codebook) == party_codebook$PARTY_CODE %>% unique() %>% length()
+```
+
+```{r}
+party_codebook %>% str()
+```
+
+So we have 1679 unique party codes in the codebook and the party codes
+are all numeric. We know by now that the party codes in our data are not
+numeric because of the "TOTAL" values and the "OTHER" party. Let's fix
+this issue before merging the party names.
+
+A quick look at the values in the party names column discovered that
+there is no "OTHER" party in the codebook but there is an "UNIDENTIFIED"
+party. For our purposes, we will consider the "OTHER" party in the data
+as "UNIDENTIFIED".
+
+### Handle "OTHER" Party
+
+```{r}
+icpsr_data[PARTY_CODE == "OTHER" , PARTY_CODE := "9001"]
+```
+
+### Handle "TOTAL" Party
+
+Now we want to convert the total votes into a new column.
+
+It should be that in each election there is only one row with the party
+code "TOTAL". Let's check if this is the case.
+
+```{r}
+total_issue <- icpsr_data[, lapply(.SD, function(x){sum(PARTY_CODE == "TOTAL")}), by = ELEC_ID, .SDcols = "PARTY_CODE"] %>% .[PARTY_CODE != 1, ] 
+
+total_issue %>% select(PARTY_CODE) %>% table() %>% as.data.table()
+```
+
+We have elections where there is no "TOTAL" votes at all and cases where
+there is more than one row with the party code "TOTAL".
+
+#### No "TOTAL" Votes
+
+```{r}
+no_total <- total_issue[PARTY_CODE == 0 , ELEC_ID]
+
+icpsr_data[ELEC_ID %in%  no_total, source] %>% unique()
+
+rm(no_total)
+```
+
+It seems that the issue is widespread in multiple datasets. From the
+ICPSR website we learn that:
+
+> Counties may have been assigned a congressional district number of
+> zero if they were not in existence at the time of the election, did
+> not report vote totals, or did not participate in that election.
+
+Which indicates that it is not uncommon to have missing data in the
+"TOTAL" votes.
+
+#### Two "TOTAL" Votes
+
+```{r}
+two_total <- total_issue[PARTY_CODE == 2 , ELEC_ID]
+
+icpsr_data[ELEC_ID %in%  two_total, source] %>% unique()
+```
+
+The cases with two "TOTAL" votes are also widespread in multiple datasets.
+
+Let's compare the different values of "TOTAL" votes in each of those cases.
+
+```{r}
+# Create a new data frame with the specific cases
+two_total <- icpsr_data[ELEC_ID %in% two_total, ]
+
+# create two more columns for the duplicated total votes
+two_total[ , ":=" (TOTAL1 = VOTES, TOTAL2 = VOTES)]
+
+two_total[!(PARTY_CODE == "TOTAL" & INDEX == 1) , ":=" (TOTAL1 = 0)]
+two_total[!(PARTY_CODE == "TOTAL" & INDEX == 2) , ":=" (TOTAL2 = 0)]
+
+two_total[ , ":=" (TOTAL1 = sum(TOTAL1), TOTAL2 = sum(TOTAL2)), by = ELEC_ID]
+
+# Check how many cases have missing values in both "TOTAL" votes
+two_total[is.na(TOTAL1) & is.na(TOTAL2) , ] %>% nrow()
+```
+
+There are two possible reasons to have one election with two records of "TOTAL" votes: 
+
+1.  The first reason is that this election is in fact two different elections that we cant differentiate between them with the data we have. In this case the best course of action is to treat them as one election and to sum up the total votes. 
+
+2.  The second reason is that this is a data entry error and the total votes were entered twice. In this case we should treat them as one election and to keep those total votes separated.
+
+Since there are many cases like this and we cant investigate each one of them, we will use a different method to differentiate between the two cases. We will create a new column with the sum of the votes (without the total votes) and another column with the sum of the two "TOTAL" votes entries. If the sum of the votes is approximately equal to the sum of the two "TOTAL" votes entries, it is indication that this election is in fact two different elections. In that case we will sum the votes of the "TOTAL" entries (and also in case that one of the "TOTAL" votes is missing). Otherwise, it is indication that this is a data entry error.
+
+```{r}
+two_total <- two_total[PARTY_CODE != "TOTAL" , ]
+# create the new columns
+two_total[ , ":=" (TOTAL3 = sum(VOTES, na.rm = T), 
+                   TOTAL4 = case_when(
+                     is.na(TOTAL1) ~ TOTAL2,
+                     is.na(TOTAL2) ~ TOTAL1,
+                     .default = TOTAL1 + TOTAL2
+                   )), by = ELEC_ID]
+
+# create a logical column to indicate if this is two different elections
+two_total[ , sum_total := case_when(
+  is.na(TOTAL1) | TOTAL1 == 0 ~ TRUE,
+  is.na(TOTAL2) | TOTAL2 == 0 ~ TRUE,
+  TOTAL3 > TOTAL4*0.9 ~ TRUE,
+  .default = FALSE
+)]
+```
+
+Now we can sum the votes of the "TOTAL" entries or keep them seperated.
+
+```{r}
+elec_to_sum <- two_total[sum_total == TRUE, ELEC_ID]
+
+icpsr_data[ELEC_ID %in% elec_to_sum & PARTY_CODE == "TOTAL", VOTES := sum(VOTES, na.rm = T), by = ELEC_ID]
+
+icpsr_data <- icpsr_data[!(ELEC_ID %in% elec_to_sum & PARTY_CODE == "TOTAL" & INDEX == 2) , ]
+```
+
+Now we will create a new column with the total votes in each election and another column with the second entry of the "TOTAL" votes in cases of data entry error.
+
+```{r}
+icpsr_data[ , ":=" (TOTAL = VOTES, TOTAL2 = VOTES)]
+
+icpsr_data[!(PARTY_CODE == "TOTAL" & INDEX == 1) , ":=" (TOTAL = 0)]
+icpsr_data[!(PARTY_CODE == "TOTAL" & INDEX == 2) , ":=" (TOTAL2 = 0)]
+
+icpsr_data[ , ":=" (TOTAL = sum(TOTAL), TOTAL2 = sum(TOTAL2)), by = ELEC_ID]
+
+# convert the second column to total votes to NA in elections without two "TOTAL" votes
+elec_no_sum <- two_total[sum_total == FALSE, ELEC_ID]
+
+icpsr_data[!(ELEC_ID %in% elec_no_sum) , ":=" (TOTAL2 = NA)]
+
+# delete the "TOTAL" votes entries
+icpsr_data <- icpsr_data[PARTY_CODE != "TOTAL" , ]
+
+# create a new column with the sum of the votes for comparison
+icpsr_data[ , ":=" (TOTAL_VOTES = sum(VOTES, na.rm = T)), by = ELEC_ID]
+
+# convert the party code to numeric to merge with the party codebook
+icpsr_data[ , PARTY_CODE := as.numeric(PARTY_CODE)]
+
+rm(two_total, elec_to_sum, elec_no_sum, total_issue)
+```
+
+Now we can merge the party names.
+
+```{r}
+icpsr_data <- merge(icpsr_data, party_codebook, by = "PARTY_CODE", all.x = TRUE)
+
+icpsr_data[is.na(PARTY_NAME) , ] %>% nrow()
+
+rm(party_codebook)
+```
+
+Unfortunately, we have some missing party names.
+
+# Organize the Data
+
+## Simplify the Data
+
+We will create a simplified version of some of the columns in the data but keep a version of the original columns as well.
+
+```{r}
+icpsr_data[ , ":=" (ELECT_OFFICE_CODE_ORIG = ELECT_OFFICE_CODE, 
+                     ELECT_OFFICE_ORIG = ELECT_OFFICE, 
+                     ELECT_TYPE_ORIG = ELECT_TYPE)]
+
+# Fill the missing values in the elected office code and delete redundant values
+icpsr_data[ , ":=" (ELECT_OFFICE_CODE = case_when(ELECT_OFFICE_CODE %in% c(4:6) ~ 4,
+                                                  ELECT_OFFICE_CODE == 7 ~ 5,
+                                                  is.na(ELECT_OFFICE_CODE) & 
+                                                    ELECT_OFFICE == "PRES" ~ 1,
+                                                  is.na(ELECT_OFFICE_CODE) & 
+                                                    ELECT_OFFICE == "GOV" ~ 2,
+                                                  .default = ELECT_OFFICE_CODE))]
+# Harmonize the elected office names
+icpsr_data[ , ":=" (ELECT_OFFICE = ifelse(ELECT_OFFICE == "HAL", "CONG", ELECT_OFFICE))]
+# Harmonize the elected office types
+icpsr_data[ , ":=" (ELECT_TYPE = case_when(ELECT_TYPE == "M" ~ "G",
+                                           ELECT_TYPE == "W" ~ "S",
+                                           .default = ELECT_TYPE))]
+
+```
+
+## Reorder Columns
+
+```{r}
+icpsr_data <- icpsr_data[, c("ICPSRST", "STATE", "ICPSRCTY", "ICPSRNAM", "YEAR", 
+                             "ELECT_OFFICE_CODE", "ELECT_OFFICE", "ELECT_TYPE", 
+                             "PARTY_CODE", "PARTY_NAME", "VOTES", "TOTAL", "TOTAL2", "TOTAL_VOTES", 
+                             "source", "MONTH", "CONG_NUM", "INDEX", "ELEC_ID",
+                             "ELECT_OFFICE_CODE_ORIG", "ELECT_OFFICE_ORIG", "ELECT_TYPE_ORIG")]
+
+icpsr_data <- icpsr_data[order(YEAR, ICPSRST, ICPSRCTY, PARTY_CODE) , ]
+```
+
+## Add Value Labels to Categorial Columns
+
+```{r}
+categories_levels <- list(
+  ELECT_OFFICE_CODE = c(President = 1, Governor = 2, Congress = 3, 
+                        Senate = 4, Attorney_General = 5),
+  ELECT_OFFICE = c(President = "PRES", Governor = "GOV", 
+                   Congress = "CONG", Senate = "SEN", Attorney_General = "ATGN"),
+  ELECT_TYPE = c(General = "G", Special = "S"),
+  ELECT_OFFICE_CODE_ORIG = c(President = 1, Governor = 2, Congress = 3, 
+                             Senate = 4, Senate = 5, Senate = 6, Attorney_General = 7),
+  ELECT_OFFICE_ORIG = c(President = "PRES", Governor = "GOV", 
+                        Congress = "CONG", Senate = "SEN", 
+                        House_of_assembly = "HAL", Attorney_General = "ATGN"),
+  ELECT_TYPE_ORIG = c(General = "G", Special = "S", 
+                      Multiple_G_elections = "M", 
+                      Multiple_S_elections_or_missing_data = "W")
+)
+
+for (col in names(categories_levels)) {
+  icpsr_data[[col]] <- labelled(icpsr_data[[col]], categories_levels[[col]])
+}
+
+rm(categories_levels)
+```
+
+## Add Labels
+
+```{r}
+# Add short explanation to the columns as labels:
+labels <- c("ICPSR State Code", "State Name", "ICPSR County Code", "County Name", "Year of Election",
+            "Elected Office Code", "Elected Office", "Election Type", 
+            "Party Code", "Party Name", "Votes", "The Original TOTAL entry", "Second TOTAL entry", 
+            "Sum of VOTES Per Election", "Original ICPSR Data Set", "Month of Election", "Congress Number", 
+            "Index", "Election ID", 
+            "Original Elected Office Code", "Original Elected Office", "Original Election Type")
+
+var_label(icpsr_data) <- labels
+
+rm(labels)
+```
+
+## Explore the Data
+
+```{r}
+icpsr_data
+```
+
+# Export Data
+
+Finally, we save the cleaned and organized data in RDS format.
+
+```{r save-data}
+saveRDS(icpsr_data, paste0(data_path, "/elections_returns/election_returns.rds"))
+```
+
+We will also save it in CSV format with a README file.
+
+```{r}
+# Write to a CSV file
+fwrite(icpsr_data, paste0(data_path, "/elections_returns/csv_version/election_returns.csv"))
+
+# create a README file with the variable information
+var_info <- look_for(icpsr_data)
+
+var_info <- var_info %>% mutate(pos = NULL, levels = NULL)
+var_info$value_labels <- lapply(var_info$value_labels, function(x) x = ifelse(is.null(x), 
+                                                                  NA, 
+                                                                  paste(names(x), x, collapse = ", "))) %>% 
+  unlist()
+
+fwrite(var_info, paste0(data_path, "/elections_returns/csv_version/README.csv"))
+
+rm(var_info)
+```
+
