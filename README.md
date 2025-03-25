@@ -44,9 +44,9 @@ ICPSR [distributor], 1999-04-26.
 https://doi.org/10.3886/ICPSR00001.v3
 
 👨‍💻 Author
-Roy Diller
+Ro'ee Diler
 
-📧 [Contact Me](mailto:roeediler@gmail.com)
+📧 [Contact Me](mailto:roeediler8@gmail.com)
 
 🌍 [GitHub Profile](https://github.com/roeediler)
 
