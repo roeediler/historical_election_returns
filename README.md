@@ -24,18 +24,26 @@ The processed dataset is available **upon request** or can be accessed on my **K
 
 Due to ICPSR's terms of use, the raw dataset may require **researcher approval**. However, the cleaned and structured data, along with the processing scripts, are provided for **replication and further analysis**. If you need access or have any questions, feel free to **reach out**!
 
-🛠️ Key Features
-📂 Handling ASCII Data & SAS Setup Files
-Uses SAScii and asciiSetupReader to read fixed-width ASCII files
+## 🚀 Key Features  
 
-Extracts metadata (variable names, formats, missing values) from SAS setup files
+This project demonstrates advanced **data processing, cleaning, and transformation** techniques on **historical election returns**. It showcases the ability to handle **large-scale datasets** using **efficient workflows** in R. Key features include:  
 
-📈 Output
-A cleaned dataset containing all election returns in a long format CSV
+- 📂 **Parsing Complex Data Structures** – Reads raw **ASCII** election data using **SAS setup files**, ensuring accurate variable mapping.  
+- 🏛 **Historical Election Data Processing** – Cleans and standardizes **county-level** returns for presidential, gubernatorial, Senate, and House elections from **1824 to 1968**.  
+- 🛠 **Data Wrangling & Preprocessing** – Handles **missing values, inconsistencies, and errors** in historical datasets using structured transformations.  
+- 📊 **Structured Data Export** – Converts unstructured raw data into **well-formatted CSV files** for **further analysis and visualization**.  
+- ⚡ **Efficient & Scalable Processing** – Optimized R scripts designed for **handling large datasets**, ensuring reproducibility and performance.  
+- 🔍 **Facilitating Political & Economic Research** – Enables data-driven insights into **voting behavior, political trends, and historical shifts**.  
+- 🎯 **Real-World Application** – Developed as part of a **university research project**, showcasing expertise in **data engineering, economic history, and political analysis**.  
+
+This project highlights **strong data manipulation skills, problem-solving ability, and attention to detail**—essential qualities for **data analytics, and research roles**.  
+
+## 📈 Output
+A cleaned dataset containing all election returns in a long format for better analysis
 
 R scripts that allow reproducible data processing for future election datasets
 
-🏛️ Citation
+## 🏛️ Citation
 If you use this project, please cite the original dataset:
 
 Inter-university Consortium for Political and Social Research.
